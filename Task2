@@ -1,0 +1,87 @@
+WITH dates AS (SELECT '20201101' AS date_start, '20201130' AS date_end)
+,
+
+first_task as
+(SELECT
+date_time,
+COUNT(DISTINCT session_id) AS total_sessions
+FROM
+  (SELECT
+    PARSE_DATE('%Y%m%d', event_date) AS date_time,
+    CONCAT(user_pseudo_id, '_', CAST(
+      (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)) AS session_id
+  FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+  WHERE
+    event_name = 'session_start'
+    AND event_date BETWEEN (SELECT date_start FROM dates) AND (SELECT date_end FROM dates))
+GROUP BY 1
+ORDER BY 1)
+,
+second_task as
+(SELECT
+  event_name,
+  REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE((SELECT value.string_value FROM UNNEST(event_params) WHERE key =    'page_location'),r'^https:\/\/(www\.)?', ''),r'\?.*$', ''),r'\.[^\/]*$', ''),r'/+$', '') AS clean_page_location,
+  COUNT(DISTINCT user_pseudo_id) AS unique_users
+FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+WHERE
+  event_date BETWEEN (SELECT date_start FROM dates) AND (SELECT date_end FROM dates)
+GROUP BY 1, 2
+ORDER BY 3 DESC)
+,
+sessions_raw AS 
+  (SELECT
+    user_pseudo_id,
+    CONCAT(user_pseudo_id, '_', CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)) AS session_id,
+    TIMESTAMP_MICROS(event_timestamp) AS session_time,
+    LOWER(IFNULL((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'source'),'(direct)')) AS source,
+    LOWER(IFNULL((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'medium'),'(none)')) AS medium
+  FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+  WHERE event_date BETWEEN (SELECT date_start FROM dates) AND (SELECT date_end FROM dates))
+,
+
+sessions_grouped AS 
+  (SELECT
+    session_id,
+    user_pseudo_id,
+    session_time,
+    source,
+    medium,
+    CASE
+      WHEN source = '(direct)' AND medium = '(none)' THEN NULL  -- direct sessions временно без канала
+      WHEN medium = 'organic'
+        OR source IN ('google', 'bing', 'yahoo', 'baidu', 'yandex.ru') THEN 'Organic Search'
+      WHEN medium = 'email'
+        OR source LIKE '%mail%' OR source LIKE '%newsletter%' THEN 'Email'
+      WHEN medium = 'referral' THEN 'Referral'
+      WHEN REGEXP_CONTAINS(source, r'(facebook|instagram|linkedin|twitter|vk|youtube|reddit|t\.co|telegram)') THEN 'Organic Social'
+      WHEN medium = 'cpc' THEN 'Paid Search'
+      WHEN medium = 'affiliate' THEN 'Affiliate'
+      ELSE 'Unassigned'
+    END AS session_default_channel_group
+  FROM sessions_raw)
+
+
+SELECT
+session_default_channel_group,
+COUNT(*) AS total_sessions
+FROM
+  (SELECT 
+  session_id,
+  IFNULL(MAX(lnd_channel), 'Direct') AS session_default_channel_group
+  FROM
+    (SELECT
+      session_id,
+      user_pseudo_id,
+      session_time,
+      source,
+      medium,
+      LAST_VALUE(session_default_channel_group IGNORE NULLS) OVER (
+        PARTITION BY user_pseudo_id
+        ORDER BY session_time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ) AS lnd_channel
+    FROM sessions_grouped)
+  GROUP BY 1)
+GROUP BY 1
+ORDER BY 2 DESC
+
