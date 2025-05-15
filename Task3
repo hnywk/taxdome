@@ -1,0 +1,51 @@
+WITH
+clients AS 
+  (SELECT
+    client_id,
+    DATE_TRUNC(DATE(created_at), MONTH) AS created_month,
+    DATE_TRUNC(DATE(deleted_at), MONTH) AS deleted_month
+  FROM `robust-resource-448823-n8.taxdom.td_clients`)
+,
+
+months AS 
+  (SELECT DISTINCT
+  Month AS month
+  FROM `robust-resource-448823-n8.taxdom.td_revenue`)
+
+,
+
+active_clients AS
+  (SELECT
+  month,
+  COUNT(DISTINCT client_id) AS active_clients
+  FROM
+    (SELECT
+    month
+    FROM months) as m
+  LEFT JOIN
+    (SELECT
+    client_id,
+    created_month,
+    deleted_month,
+    DATE_ADD(created_month, INTERVAL 1 MONTH) AS active_until_month
+    FROM clients) as c
+  ON c.created_month <= m.month
+     AND m.month <= c.active_until_month
+     AND (c.deleted_month IS NULL OR c.deleted_month > m.month)
+  GROUP BY month)
+  
+
+  SELECT
+    ac.month,
+    active_clients,
+    revenue
+  FROM
+    (SELECT *
+    FROM active_clients) as ac
+  LEFT JOIN
+    (SELECT *
+    FROM `robust-resource-448823-n8.taxdom.td_revenue`) as r
+  ON ac.month = r.month
+ORDER BY month
+
+
